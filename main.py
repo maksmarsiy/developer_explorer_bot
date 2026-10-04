@@ -84,6 +84,47 @@ DIRECTIONS = {
     'game_dev': 'Game Development',
 }
 
+LANGUAGES = {
+    'python': 'Python',
+    'go': 'Go',
+    'java': 'Java',
+    'js': 'JavaScript',
+    'ts': 'TypeScript',
+    'csharp': 'C#',
+    'cpp': 'C++',
+    'php': 'PHP',
+    'rust': 'Rust',
+    'sql': 'SQL',
+    'r': 'R',
+    'scala': 'Scala',
+    'hcl': 'HCL',
+    'kotlin': 'Kotlin',
+    'swift': 'Swift',
+    'dart': 'Dart',
+    'gdscript': 'GDScript',
+    'lua': 'Lua',
+    'shell': 'Shell',
+}
+
+LANGUAGES_BY_DIRECTION = {
+    'backend': [
+        'python',
+        'go',
+        'java',
+        'js',
+        'ts',
+        'csharp',
+        'php',
+        'rust',
+    ],
+    'frontend': ['ts', 'js'],
+    'ai_ml': ['python', 'cpp'],
+    'data': ['python', 'sql', 'r', 'scala'],
+    'dev_ops': ['python', 'go', 'shell', 'hcl'],
+    'mobile': ['kotlin', 'swift', 'dart'],
+    'game_dev': ['cpp', 'csharp', 'gdscript', 'lua'],
+}
+
 
 @dp.message(CommandStart())
 async def start_handler(message: Message) -> None:
@@ -103,16 +144,49 @@ async def find_projects_handler(message: Message) -> None:
 
 @dp.callback_query(F.data.in_(DIRECTIONS))
 async def direction_handler(callback: CallbackQuery) -> None:
-    await callback.answer()
-
     if callback.data is None:
         return
 
     direction_name = DIRECTIONS[callback.data]
+    languages = LANGUAGES_BY_DIRECTION[callback.data]
 
-    await callback.message.answer(
-        f'Вы выбрали {direction_name}'
+    languages_keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=LANGUAGES[language],
+                    callback_data=f'language:{callback.data}:{language}',
+                )
+            ]
+            for language in languages
+        ]
     )
+
+    await callback.message.edit_text(
+        f'Направление: {direction_name}\n'
+        'Выберите язык:',
+        reply_markup=languages_keyboard,
+    )
+
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith('language:'))
+async def language_handler(callback: CallbackQuery) -> None:
+    if callback.data is None:
+        return
+
+    _, direction, language = callback.data.split(':')
+
+    direction_name = DIRECTIONS[direction]
+    language_name = LANGUAGES[language]
+
+    await callback.message.edit_text(
+        f'Направление: {direction_name}\n'
+        f'Язык: {language_name}'
+    )
+
+    await callback.answer()
 
 
 async def main() -> None:
