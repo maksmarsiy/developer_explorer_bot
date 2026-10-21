@@ -50,3 +50,13 @@ LANGUAGES_BY_DIRECTION = {
     'mobile': ['kotlin', 'swift', 'dart'],
     'game_dev': ['cpp', 'csharp', 'gdscript', 'lua'],
 }
+
+GITHUB_TOPICS = {
+    'backend': ['backend', 'rest-api', 'web-api'],
+    'frontend': ['frontend', 'web-app', 'ui'],
+    'ai_ml': ['machine-learning', 'deep-learning', 'artificial-intelligence'],
+    'data': ['data-analysis', 'data-science', 'data-engineering'],
+    'dev_ops': ['devops', 'infrastructure', 'automation'],
+    'mobile': ['android', 'ios', 'mobile-app'],
+    'game_dev': ['game', 'gamedev', 'game-development'],
+}

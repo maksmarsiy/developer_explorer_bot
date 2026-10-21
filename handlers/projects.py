@@ -74,7 +74,7 @@ async def language_handler(
     await callback.answer()
 
     try:
-        projects = await get_projects(language, github_client)
+        projects = await get_projects(direction, language, github_client)
 
     except httpx.TimeoutException:
         await callback.message.edit_text(
@@ -91,6 +91,12 @@ async def language_handler(
     except httpx.RequestError:
         await callback.message.edit_text(
             '🌐 Не удалось подключиться к GitHub. Попробуйте позже.'
+        )
+        return
+
+    if not projects:
+        await callback.message.edit_text(
+            '🔎 По выбранному направлению и языку проекты не найдены.'
         )
         return
 
