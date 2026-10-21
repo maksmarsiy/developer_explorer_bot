@@ -67,7 +67,7 @@ def get_languages_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text = LANGUAGES[language],
+                    text=LANGUAGES[language],
                     callback_data=f'language:{direction}:{language}',
                 )
             ]

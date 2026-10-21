@@ -1,6 +1,7 @@
 import asyncio
 import os
 
+import httpx
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
@@ -23,7 +24,8 @@ dp.include_router(projects_router)
 
 
 async def main() -> None:
-    await dp.start_polling(bot)
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        await dp.start_polling(bot, github_client=client)
 
 
 if __name__ == '__main__':
