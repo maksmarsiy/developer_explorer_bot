@@ -3,3 +3,5 @@
 .venv_old/
 .idea/
 __pycache__/
+
+.DS_Store
