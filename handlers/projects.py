@@ -2,66 +2,76 @@ import httpx
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
 
+from data.callbacks import DirectionCb, LanguageCb
 from data.dictionaries import DIRECTIONS, LANGUAGES, LANGUAGES_BY_DIRECTION
-from keyboards.menus import directions_keyboard, get_languages_keyboard
+from keyboards.menus import get_directions_keyboard, get_languages_keyboard
 from services.github import get_projects
 
 router = Router()
+
+
+async def get_callback_message(callback: CallbackQuery) -> Message | None:
+    if not isinstance(callback.message, Message):
+        await callback.answer('Сообщение недоступно. Откройте меню заново.')
+        return None
+
+    return callback.message
 
 
 @router.message(F.text == '🚀 Найти проекты')
 async def find_projects_handler(message: Message) -> None:
     await message.answer(
         'Выберите направление',
-        reply_markup=directions_keyboard
+        reply_markup=get_directions_keyboard()
     )
 
 
-@router.callback_query(F.data.in_(DIRECTIONS))
-async def direction_handler(callback: CallbackQuery) -> None:
-    if callback.data is None:
+@router.callback_query(DirectionCb.filter())
+async def direction_handler(
+        callback: CallbackQuery,
+        callback_data: DirectionCb,
+) -> None:
+    message = await get_callback_message(callback)
+
+    if message is None:
         return
 
-    if not isinstance(callback.message, Message):
-        await callback.answer('Сообщение недоступно. Откройте меню заново.')
+    direction = callback_data.direction
+
+    if direction not in DIRECTIONS:
+        await callback.answer('Некорректное направление.', show_alert=True)
         return
 
-    direction_name = DIRECTIONS[callback.data]
-    languages = LANGUAGES_BY_DIRECTION[callback.data]
+    direction_name = DIRECTIONS[direction]
+    languages = LANGUAGES_BY_DIRECTION[direction]
 
     languages_keyboard = get_languages_keyboard(
-        direction=callback.data,
+        direction=direction,
         languages=languages,
     )
 
     await callback.answer()
 
-    await callback.message.edit_text(
+    await message.edit_text(
         f'Направление: {direction_name}\n'
         'Выберите язык:',
         reply_markup=languages_keyboard,
     )
 
 
-@router.callback_query(F.data.startswith('language:'))
+@router.callback_query(LanguageCb.filter())
 async def language_handler(
         callback: CallbackQuery,
-        github_client: httpx.AsyncClient
+        callback_data: LanguageCb,
+        github_client: httpx.AsyncClient,
 ) -> None:
-    if callback.data is None:
+    message = await get_callback_message(callback)
+
+    if message is None:
         return
 
-    if not isinstance(callback.message, Message):
-        await callback.answer('Сообщение недоступно. Откройте меню заново.')
-        return
-
-    parts = callback.data.split(':')
-
-    if len(parts) != 3:
-        await callback.answer('Некорректные данные. Откройте меню заново.')
-        return
-
-    _, direction, language = parts
+    direction = callback_data.direction
+    language = callback_data.language
 
     if (
             direction not in DIRECTIONS
@@ -77,25 +87,31 @@ async def language_handler(
         projects = await get_projects(direction, language, github_client)
 
     except httpx.TimeoutException:
-        await callback.message.edit_text(
+        await message.edit_text(
             '⏳ GitHub слишком долго отвечает. Попробуйте позже.'
         )
         return
 
     except httpx.HTTPStatusError as error:
-        await callback.message.edit_text(
-            f'⚠️ GitHub API вернул ошибку: {error.response.status_code}'
-        )
+        if error.response.status_code in (403, 429):
+            await message.edit_text(
+                '⏳ GitHub временно ограничил количество запросов. '
+                'Попробуйте немного позже.'
+            )
+        else:
+            await message.edit_text(
+                '⚠️ Ошибка GitHub API. Попробуйте позже.'
+            )
         return
 
     except httpx.RequestError:
-        await callback.message.edit_text(
+        await message.edit_text(
             '🌐 Не удалось подключиться к GitHub. Попробуйте позже.'
         )
         return
 
     if not projects:
-        await callback.message.edit_text(
+        await message.edit_text(
             '🔎 По выбранному направлению и языку проекты не найдены.'
         )
         return
@@ -117,4 +133,4 @@ async def language_handler(
             f"🔗 {project['url']}\n\n"
         )
 
-    await callback.message.edit_text(text)
+    await message.edit_text(text)

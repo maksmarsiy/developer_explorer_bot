@@ -1,12 +1,13 @@
 DIRECTIONS = {
-    'backend': 'Backend',
-    'frontend': 'Frontend',
-    'ai_ml': 'AI / ML',
-    'data': 'Data',
-    'dev_ops': 'DevOps',
-    'mobile': 'Mobile',
-    'game_dev': 'Game Development',
+    'backend': '⚙️ Backend',
+    'frontend': '🎨 Frontend',
+    'ai_ml': '🤖 AI / ML',
+    'data': '📊 Data',
+    'dev_ops': '☁️ DevOps',
+    'mobile': '📱 Mobile',
+    'game_dev': '🎮 Game Development',
 }
+
 
 
 LANGUAGES = {

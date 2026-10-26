@@ -4,8 +4,10 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardMarkup,
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from data.dictionaries import LANGUAGES
+from data.callbacks import DirectionCb, LanguageCb
+from data.dictionaries import DIRECTIONS, LANGUAGES
 
 
 find_projects_button = KeyboardButton(text='🚀 Найти проекты')
@@ -20,43 +22,19 @@ main_keyboard = ReplyKeyboardMarkup(
     ]
 )
 
-backend_button = InlineKeyboardButton(
-    text='⚙️ Backend',
-    callback_data='backend',
-)
-frontend_button = InlineKeyboardButton(
-    text='🎨 Frontend',
-    callback_data='frontend'
-)
-ai_ml_button = InlineKeyboardButton(
-    text='🤖 AI / ML',
-    callback_data='ai_ml'
-)
-data_button = InlineKeyboardButton(
-    text='📊 Data',
-    callback_data='data'
-)
-dev_ops_button = InlineKeyboardButton(
-    text='☁️ DevOps',
-    callback_data='dev_ops'
-)
-mobile_button = InlineKeyboardButton(
-    text='📱 Mobile',
-    callback_data='mobile'
-)
-game_dev_button = InlineKeyboardButton(
-    text='🎮 Game Development',
-    callback_data='game_dev'
-)
 
-directions_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [backend_button, frontend_button],
-        [ai_ml_button, data_button],
-        [dev_ops_button, mobile_button],
-        [game_dev_button],
-    ]
-)
+def get_directions_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    for key, title in DIRECTIONS.items():
+        builder.button(
+            text=title,
+            callback_data=DirectionCb(direction=key).pack(),
+        )
+
+    builder.adjust(2)
+
+    return builder.as_markup()
 
 
 def get_languages_keyboard(
@@ -68,7 +46,10 @@ def get_languages_keyboard(
             [
                 InlineKeyboardButton(
                     text=LANGUAGES[language],
-                    callback_data=f'language:{direction}:{language}',
+                    callback_data=LanguageCb(
+                        direction=direction,
+                        language=language,
+                    ).pack(),
                 )
             ]
             for language in languages
