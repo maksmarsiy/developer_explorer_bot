@@ -5,6 +5,7 @@ import httpx
 from aiogram import Bot, Dispatcher
 from dotenv import load_dotenv
 
+from database.connection import init_db
 from handlers.projects import router as projects_router
 from handlers.start import router as start_router
 
@@ -29,6 +30,7 @@ dp.include_router(projects_router)
 
 
 async def main() -> None:
+    await init_db()
     async with httpx.AsyncClient(
             timeout=10.0,
             headers={

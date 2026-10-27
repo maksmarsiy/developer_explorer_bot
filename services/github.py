@@ -1,15 +1,25 @@
 import random
+from typing import TypedDict
 
 import httpx
 
 from data.dictionaries import GITHUB_TOPICS
 
 
+class GitHubProject(TypedDict):
+    id: int
+    full_name: str
+    name: str
+    description: str
+    url: str
+    stars: int
+
+
 async def get_projects(
         direction: str,
         language: str,
         client: httpx.AsyncClient
-) -> list[dict[str, str | int | None]]:
+) -> list[GitHubProject]:
     topics = random.sample(
         GITHUB_TOPICS[direction],
         k=len(GITHUB_TOPICS[direction])
@@ -25,7 +35,7 @@ async def get_projects(
                     'q': (
                         f'language:{language} '
                         f'topic:{topic} '
-                        'stars:10..500 archived:false'
+                        'stars:10..500 archived:false is:public'
                     ),
                     'per_page': 100,
                 }
@@ -50,10 +60,12 @@ async def get_projects(
         if repositories:
             break
 
-    projects = []
+    projects: list[GitHubProject] = []
 
     for repository in random.sample(repositories, k=min(3, len(repositories))):
-        project = {
+        project: GitHubProject = {
+            'id': repository['id'],
+            'full_name': repository['full_name'],
             'name': repository['name'],
             'description': repository['description'] or 'Описание отсутствует',
             'url': repository['html_url'],
