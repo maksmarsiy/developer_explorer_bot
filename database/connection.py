@@ -1,10 +1,20 @@
+import os
+from pathlib import Path
+
 import aiosqlite
+from dotenv import load_dotenv
 
 
-DB_PATH = "bot.db"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / '.env')
+DB_PATH = Path(os.getenv('DB_PATH') or PROJECT_ROOT / 'bot.db').expanduser()
+if not DB_PATH.is_absolute():
+    DB_PATH = PROJECT_ROOT / DB_PATH
+DB_PATH = DB_PATH.resolve()
 
 
 async def init_db() -> None:
+    Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('''
             CREATE TABLE IF NOT EXISTS history (

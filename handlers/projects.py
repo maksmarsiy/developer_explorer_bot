@@ -1,9 +1,12 @@
-import asyncio
 
+import asyncio
+import logging
+
+import aiosqlite
 import httpx
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 
 from data.callbacks import DirectionCb, LanguageCb, RetrySearchCb
 from data.dictionaries import DIRECTIONS, LANGUAGES, LANGUAGES_BY_DIRECTION
@@ -14,14 +17,51 @@ from keyboards.menus import (
     get_languages_keyboard,
     get_results_keyboard,
     get_search_keyboard,
-    main_keyboard
+    main_keyboard,
 )
 from services.github import GitHubProject, get_projects, search_projects
 
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 search_locks: dict[int, asyncio.Lock] = {}
+search_versions: dict[int, int] = {}
+message_locks: dict[tuple[int, int], asyncio.Lock] = {}
+
+
+def next_search_version(user_id: int) -> int:
+    version = search_versions.get(user_id, 0) + 1
+    search_versions[user_id] = version
+    return version
+
+
+def is_search_current(user_id: int, version: int) -> bool:
+    return search_versions.get(user_id) == version
+
+
+async def save_project_safely(**kwargs) -> None:
+    try:
+        await save_project(**kwargs)
+    except aiosqlite.Error:
+        logger.exception('Не удалось сохранить проект в историю')
+
+
+async def edit_current_message(
+        message: Message,
+        user_id: int,
+        version: int,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+) -> bool:
+    # Navigation waits only for an edit of this message, never for GitHub/SQLite.
+    key = (message.chat.id, message.message_id)
+    lock = message_locks.setdefault(key, asyncio.Lock())
+    async with lock:
+        if not is_search_current(user_id, version):
+            return False
+        await message.edit_text(text, reply_markup=reply_markup)
+        return is_search_current(user_id, version)
 
 
 def get_github_error_message(error: httpx.HTTPError) -> str:
@@ -71,6 +111,10 @@ async def find_projects_handler(
         message: Message,
         state: FSMContext,
 ) -> None:
+    if message.from_user is None:
+        return
+
+    next_search_version(message.from_user.id)
     await state.clear()
 
     await message.answer(
@@ -84,6 +128,11 @@ async def search_handler(
         message: Message,
         state: FSMContext,
 ) -> None:
+    if message.from_user is None:
+        return
+
+    next_search_version(message.from_user.id)
+    await state.clear()
     await state.set_state(SearchStates.waiting_for_query)
 
     await message.answer(
@@ -97,13 +146,23 @@ async def history_handler(
         message: Message,
         state: FSMContext,
 ) -> None:
-    await state.clear()
-
     if message.from_user is None:
         return
 
     user_id = message.from_user.id
-    history = await get_history(user_id)
+    version = next_search_version(user_id)
+    await state.clear()
+
+    try:
+        history = await get_history(user_id)
+    except aiosqlite.Error:
+        logger.exception('Не удалось прочитать историю')
+        if is_search_current(user_id, version):
+            await message.answer('⚠️ Не удалось загрузить историю. Попробуйте позже.')
+        return
+
+    if not is_search_current(user_id, version):
+        return
 
     if not history:
         await message.answer('История просмотров пока пуста.')
@@ -137,7 +196,17 @@ async def history_handler(
             f'📅 {shown_at} UTC\n\n'
         )
 
-    await message.answer(text)
+    # 2000 Unicode characters fit even when every character uses two UTF-16 units.
+    while text:
+        if not is_search_current(user_id, version):
+            return
+        end = min(2000, len(text))
+        if end < len(text):
+            newline = text.rfind('\n', 0, end)
+            if newline >= 0:
+                end = newline + 1
+        await message.answer(text[:end])
+        text = text[end:]
 
 
 @router.message(F.text == '❓ Помощь')
@@ -145,6 +214,10 @@ async def help_handler(
         message: Message,
         state: FSMContext,
 ) -> None:
+    if message.from_user is None:
+        return
+
+    next_search_version(message.from_user.id)
     await state.clear()
 
     await message.answer(
@@ -184,18 +257,26 @@ async def process_search_query(
         return
 
     async with lock:
+        version = next_search_version(user_id)
+
         try:
             projects = await search_projects(query, github_client)
 
         except httpx.HTTPError as error:
-            await message.answer(get_github_error_message(error))
+            if is_search_current(user_id, version):
+                await message.answer(get_github_error_message(error))
+            return
+
+        if not is_search_current(user_id, version):
             return
 
         if not projects:
             await message.answer(
                 '🔎 По вашему запросу репозитории не найдены.'
             )
-            await state.clear()
+
+            if is_search_current(user_id, version):
+                await state.clear()
             return
 
         text = f'🔎 Результаты поиска по запросу: {query}\n\n'
@@ -203,13 +284,19 @@ async def process_search_query(
         for project in projects:
             text += format_project(project)
 
+        if not is_search_current(user_id, version):
+            return
+
         await message.answer(
             text,
-            reply_markup=get_results_keyboard('text'),
+            reply_markup=get_results_keyboard('text', version=version),
         )
 
+        if not is_search_current(user_id, version):
+            return
+
         for project in projects:
-            await save_project(
+            await save_project_safely(
                 user_id=user_id,
                 repo_id=project['id'],
                 repo_name=project['full_name'],
@@ -218,18 +305,24 @@ async def process_search_query(
                 query_text=query,
             )
 
-        await state.set_state(None)
+        if not is_search_current(user_id, version):
+            return
+
         await state.update_data(
             search_type='text',
             query_text=query,
             shown_repo_ids=[project['id'] for project in projects],
         )
 
+        if is_search_current(user_id, version):
+            await state.set_state(None)
+
 
 @router.callback_query(DirectionCb.filter())
 async def direction_handler(
         callback: CallbackQuery,
         callback_data: DirectionCb,
+        state: FSMContext,
 ) -> None:
     message = await get_callback_message(callback)
 
@@ -242,6 +335,9 @@ async def direction_handler(
         await callback.answer('Некорректное направление.', show_alert=True)
         return
 
+    version = next_search_version(callback.from_user.id)
+    await state.clear()
+
     direction_name = DIRECTIONS[direction]
     languages = LANGUAGES_BY_DIRECTION[direction]
 
@@ -252,7 +348,8 @@ async def direction_handler(
 
     await callback.answer()
 
-    await message.edit_text(
+    await edit_current_message(
+        message, callback.from_user.id, version,
         f'Направление: {direction_name}\n'
         'Выберите язык:',
         reply_markup=languages_keyboard,
@@ -260,15 +357,22 @@ async def direction_handler(
 
 
 @router.callback_query(F.data == 'back_to_directions')
-async def back_to_directions_handler(callback: CallbackQuery) -> None:
+async def back_to_directions_handler(
+        callback: CallbackQuery,
+        state: FSMContext,
+) -> None:
     message = await get_callback_message(callback)
 
     if message is None:
         return
 
+    version = next_search_version(callback.from_user.id)
+    await state.clear()
+
     await callback.answer()
 
-    await message.edit_text(
+    await edit_current_message(
+        message, callback.from_user.id, version,
         'Выберите направление:',
         reply_markup=get_directions_keyboard(),
     )
@@ -284,10 +388,15 @@ async def back_to_main_handler(
     if message is None:
         return
 
+    version = next_search_version(callback.from_user.id)
+
     await state.clear()
     await callback.answer()
 
-    await message.edit_text('🏠 Главное меню')
+    if not await edit_current_message(
+        message, callback.from_user.id, version, '🏠 Главное меню',
+    ):
+        return
 
     await message.answer(
         'Выберите действие:',
@@ -307,49 +416,10 @@ async def retry_search_handler(
     if message is None:
         return
 
-    data = await state.get_data()
     search_type = callback_data.search_type
 
     if search_type not in ('direction', 'text'):
         await callback.answer('Неизвестный тип поиска.', show_alert=True)
-        return
-
-    if search_type == 'direction':
-        direction = callback_data.direction
-        language = callback_data.language
-
-        if (
-                direction not in DIRECTIONS
-                or language not in LANGUAGES
-                or language not in LANGUAGES_BY_DIRECTION[direction]
-        ):
-            await callback.answer('Некорректный выбор.', show_alert=True)
-            return
-
-        same_search = (
-            data.get('search_type') == 'direction'
-            and data.get('direction') == direction
-            and data.get('language') == language
-        )
-
-        query = None
-
-    else:
-        direction = None
-        language = None
-        query = data.get('query_text')
-
-        same_search = (
-            isinstance(query, str)
-            and bool(query)
-            and data.get('search_type') == 'text'
-        )
-
-    if not same_search:
-        await callback.answer(
-            'Данные поиска устарели. Начните новый поиск.',
-            show_alert=True,
-        )
         return
 
     user_id = callback.from_user.id
@@ -362,15 +432,69 @@ async def retry_search_handler(
         )
         return
 
-    await callback.answer()
-
     async with lock:
+        data = await state.get_data()
+        version = callback_data.version
+
+        if not is_search_current(user_id, version):
+            await callback.answer(
+                'Данные поиска устарели. Начните новый поиск.',
+                show_alert=True,
+            )
+            return
+
+        if search_type == 'direction':
+            direction = callback_data.direction
+            language = callback_data.language
+
+            if (
+                direction not in DIRECTIONS
+                or language not in LANGUAGES
+                or language not in LANGUAGES_BY_DIRECTION[direction]
+            ):
+                await callback.answer(
+                    'Некорректный выбор.',
+                    show_alert=True,
+                )
+                return
+
+            same_search = (
+                data.get('search_type') == 'direction'
+                and data.get('direction') == direction
+                and data.get('language') == language
+            )
+
+            query = None
+
+        else:
+            direction = None
+            language = None
+            query = data.get('query_text')
+
+            same_search = (
+                isinstance(query, str)
+                and bool(query)
+                and data.get('search_type') == 'text'
+            )
+
+        if not same_search:
+            await callback.answer(
+                'Данные поиска устарели. Начните новый поиск.',
+                show_alert=True,
+            )
+            return
+
+        await callback.answer()
+
+        if not is_search_current(user_id, version):
+            return
+
         exclude_ids = set(data.get('shown_repo_ids', []))
 
         try:
             if search_type == 'direction':
-                assert direction is not None
-                assert language is not None
+                assert isinstance(direction, str)
+                assert isinstance(language, str)
 
                 projects = await get_projects(
                     direction,
@@ -379,7 +503,7 @@ async def retry_search_handler(
                     exclude_ids=exclude_ids,
                 )
             else:
-                assert query is not None
+                assert isinstance(query, str)
 
                 projects = await search_projects(
                     query,
@@ -388,7 +512,11 @@ async def retry_search_handler(
                 )
 
         except httpx.HTTPError as error:
-            await message.answer(get_github_error_message(error))
+            if is_search_current(user_id, version):
+                await message.answer(get_github_error_message(error))
+            return
+
+        if not is_search_current(user_id, version):
             return
 
         if not projects:
@@ -400,17 +528,23 @@ async def retry_search_handler(
         for project in projects:
             text += format_project(project)
 
-        await message.edit_text(
+        if not await edit_current_message(
+            message, user_id, version,
             text,
             reply_markup=get_results_keyboard(
                 search_type=search_type,
                 direction=direction or '',
                 language=language or '',
+                version=version,
             ),
-        )
+        ):
+            return
+
+        if not is_search_current(user_id, version):
+            return
 
         for project in projects:
-            await save_project(
+            await save_project_safely(
                 user_id=user_id,
                 repo_id=project['id'],
                 repo_name=project['full_name'],
@@ -420,6 +554,9 @@ async def retry_search_handler(
                 language=language,
                 query_text=query,
             )
+
+        if not is_search_current(user_id, version):
+            return
 
         exclude_ids.update(project['id'] for project in projects)
 
@@ -452,7 +589,6 @@ async def language_handler(
         return
 
     user_id = callback.from_user.id
-
     lock = search_locks.setdefault(user_id, asyncio.Lock())
 
     if lock.locked():
@@ -463,19 +599,34 @@ async def language_handler(
         return
 
     async with lock:
+        version = next_search_version(user_id)
+
         await callback.answer()
 
+        if not is_search_current(user_id, version):
+            return
+
         try:
-            projects = await get_projects(direction, language, github_client)
+            projects = await get_projects(
+                direction,
+                language,
+                github_client,
+            )
 
         except httpx.HTTPError as error:
-            await message.edit_text(
-                get_github_error_message(error)
-            )
+            if is_search_current(user_id, version):
+                await edit_current_message(
+                    message, user_id, version,
+                    get_github_error_message(error)
+                )
+            return
+
+        if not is_search_current(user_id, version):
             return
 
         if not projects:
-            await message.edit_text(
+            await edit_current_message(
+                message, user_id, version,
                 '🔎 По выбранному направлению и языку проекты не найдены.'
             )
             return
@@ -492,17 +643,23 @@ async def language_handler(
         for project in projects:
             text += format_project(project)
 
-        await message.edit_text(
+        if not await edit_current_message(
+            message, user_id, version,
             text,
             reply_markup=get_results_keyboard(
                 search_type='direction',
                 direction=direction,
                 language=language,
+                version=version,
             ),
-        )
+        ):
+            return
+
+        if not is_search_current(user_id, version):
+            return
 
         for project in projects:
-            await save_project(
+            await save_project_safely(
                 user_id=user_id,
                 repo_id=project['id'],
                 repo_name=project['full_name'],
@@ -512,10 +669,15 @@ async def language_handler(
                 language=language,
             )
 
-        await state.set_state(None)
+        if not is_search_current(user_id, version):
+            return
+
         await state.update_data(
             search_type='direction',
             direction=direction,
             language=language,
             shown_repo_ids=[project['id'] for project in projects],
         )
+
+        if is_search_current(user_id, version):
+            await state.set_state(None)

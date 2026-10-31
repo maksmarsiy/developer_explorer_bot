@@ -101,6 +101,7 @@ def get_results_keyboard(
         search_type: str,
         direction: str = '',
         language: str = '',
+        version: int = 0,
 ) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -111,6 +112,7 @@ def get_results_keyboard(
                         search_type=search_type,
                         direction=direction,
                         language=language,
+                        version=version,
                     ).pack(),
                 )
             ],

@@ -6,6 +6,10 @@ import httpx
 from data.dictionaries import GITHUB_TOPICS
 
 
+SEARCH_PAGE_SIZE = 100
+MAX_SEARCH_PAGES = 5
+
+
 class GitHubProject(TypedDict):
     id: int
     full_name: str
@@ -105,27 +109,34 @@ async def search_projects(
     if exclude_ids is None:
         exclude_ids = set()
 
-    response = await client.get(
-        'https://api.github.com/search/repositories',
-        params={
-            'q': f'{query} archived:false is:public',
-            'per_page': 10,
-        },
-    )
-
-    response.raise_for_status()
-    data = response.json()
-    repositories = data['items']
-
     projects: list[GitHubProject] = []
+    seen_ids = set(exclude_ids)
 
-    for repository in repositories:
-        if repository['id'] in exclude_ids:
-            continue
+    for page in range(1, MAX_SEARCH_PAGES + 1):
+        response = await client.get(
+            'https://api.github.com/search/repositories',
+            params={
+                'q': f'{query} archived:false is:public',
+                'per_page': SEARCH_PAGE_SIZE,
+                'page': page,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()
+        repositories = data['items']
 
-        projects.append(parse_repository(repository))
+        for repository in repositories:
+            if repository['id'] in seen_ids:
+                continue
 
-        if len(projects) == 3:
+            seen_ids.add(repository['id'])
+            projects.append(parse_repository(repository))
+            if len(projects) == 3:
+                return projects
+
+        if len(repositories) < SEARCH_PAGE_SIZE:
+            break
+        if page * SEARCH_PAGE_SIZE >= data.get('total_count', float('inf')):
             break
 
     return projects
