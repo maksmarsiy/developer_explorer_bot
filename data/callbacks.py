@@ -8,3 +8,9 @@ class DirectionCb(CallbackData, prefix='direction'):
 class LanguageCb(CallbackData, prefix='lang'):
     direction: str
     language: str
+
+
+class RetrySearchCb(CallbackData, prefix='retry'):
+    search_type: str
+    direction: str = ''
+    language: str = ''

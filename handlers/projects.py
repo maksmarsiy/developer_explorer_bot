@@ -2,17 +2,60 @@ import asyncio
 
 import httpx
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from data.callbacks import DirectionCb, LanguageCb
+from data.callbacks import DirectionCb, LanguageCb, RetrySearchCb
 from data.dictionaries import DIRECTIONS, LANGUAGES, LANGUAGES_BY_DIRECTION
+from data.states import SearchStates
 from database.history import get_history, save_project
-from keyboards.menus import get_directions_keyboard, get_languages_keyboard
-from services.github import get_projects
+from keyboards.menus import (
+    get_directions_keyboard,
+    get_languages_keyboard,
+    get_results_keyboard,
+    get_search_keyboard,
+    main_keyboard
+)
+from services.github import GitHubProject, get_projects, search_projects
+
 
 router = Router()
 
 search_locks: dict[int, asyncio.Lock] = {}
+
+
+def get_github_error_message(error: httpx.HTTPError) -> str:
+    if isinstance(error, httpx.TimeoutException):
+        return '⏳ GitHub слишком долго отвечает. Попробуйте позже.'
+
+    if isinstance(error, httpx.HTTPStatusError):
+        if error.response.status_code in (403, 429):
+            return (
+                '⏳ GitHub временно ограничил количество запросов. '
+                'Попробуйте немного позже.'
+            )
+
+        return '⚠️ Ошибка GitHub API. Попробуйте позже.'
+
+    if isinstance(error, httpx.RequestError):
+        return '🌐 Не удалось подключиться к GitHub. Попробуйте позже.'
+
+    return '⚠️ Неизвестная ошибка GitHub API.'
+
+
+def format_project(project: GitHubProject) -> str:
+    project_language = project['language'] or 'Не указан'
+    updated_at = project['updated_at'][:10]
+
+    return (
+        f"📦 {project['name']}\n"
+        f"📝 {project['description']}\n"
+        f"💻 Язык: {project_language}\n"
+        f"⭐ Звёзды: {project['stars']}\n"
+        f"🍴 Форки: {project['forks']}\n"
+        f"📅 Обновлён: {updated_at}\n"
+        f"🔗 {project['url']}\n\n"
+    )
 
 
 async def get_callback_message(callback: CallbackQuery) -> Message | None:
@@ -24,15 +67,38 @@ async def get_callback_message(callback: CallbackQuery) -> Message | None:
 
 
 @router.message(F.text == '🚀 Найти проекты')
-async def find_projects_handler(message: Message) -> None:
+async def find_projects_handler(
+        message: Message,
+        state: FSMContext,
+) -> None:
+    await state.clear()
+
     await message.answer(
         'Выберите направление',
-        reply_markup=get_directions_keyboard()
+        reply_markup=get_directions_keyboard(),
+    )
+
+
+@router.message(F.text == '🔎 Поиск')
+async def search_handler(
+        message: Message,
+        state: FSMContext,
+) -> None:
+    await state.set_state(SearchStates.waiting_for_query)
+
+    await message.answer(
+        '🔎 Введите название проекта или ключевые слова для поиска на GitHub.',
+        reply_markup=get_search_keyboard(),
     )
 
 
 @router.message(F.text == '🕘 История')
-async def history_handler(message: Message) -> None:
+async def history_handler(
+        message: Message,
+        state: FSMContext,
+) -> None:
+    await state.clear()
+
     if message.from_user is None:
         return
 
@@ -45,14 +111,119 @@ async def history_handler(message: Message) -> None:
 
     text = '🕘 Последние просмотренные проекты:\n\n'
 
-    for repo_name, repo_url, shown_at in history:
+    for (
+            repo_name,
+            repo_url,
+            shown_at,
+            query_type,
+            direction,
+            language,
+            query_text,
+    ) in history:
+        if query_type == 'direction':
+            search_info = (
+                f'Направление: {DIRECTIONS.get(direction, direction)}\n'
+                f'Язык: {LANGUAGES.get(language, language)}\n'
+            )
+        elif query_type == 'text':
+            search_info = f'Запрос: {query_text}\n'
+        else:
+            search_info = 'Способ поиска: не указан\n'
+
         text += (
             f'📦 {repo_name}\n'
+            f'{search_info}'
             f'🔗 {repo_url}\n'
             f'📅 {shown_at} UTC\n\n'
         )
 
     await message.answer(text)
+
+
+@router.message(F.text == '❓ Помощь')
+async def help_handler(
+        message: Message,
+        state: FSMContext,
+) -> None:
+    await state.clear()
+
+    await message.answer(
+        '❓ Как пользоваться ботом:\n\n'
+        '🚀 Найти проекты — поиск по направлению и языку.\n'
+        '🔎 Поиск — поиск по ключевым словам.\n'
+        '🕘 История — последние 10 просмотренных проектов.\n'
+        '🔄 Искать ещё — получить следующие 3 проекта.\n'
+        '🏠 Главное меню — вернуться к основным разделам.'
+    )
+
+
+@router.message(SearchStates.waiting_for_query)
+async def process_search_query(
+        message: Message,
+        state: FSMContext,
+        github_client: httpx.AsyncClient,
+) -> None:
+    if message.text is None:
+        await message.answer('Пожалуйста, введите текстовый запрос.')
+        return
+
+    query = message.text.strip()
+
+    if not query:
+        await message.answer('Поисковый запрос не может быть пустым.')
+        return
+
+    if message.from_user is None:
+        return
+
+    user_id = message.from_user.id
+    lock = search_locks.setdefault(user_id, asyncio.Lock())
+
+    if lock.locked():
+        await message.answer('⏳ Поиск уже выполняется.')
+        return
+
+    async with lock:
+        try:
+            projects = await search_projects(query, github_client)
+
+        except httpx.HTTPError as error:
+            await message.answer(get_github_error_message(error))
+            return
+
+        if not projects:
+            await message.answer(
+                '🔎 По вашему запросу репозитории не найдены.'
+            )
+            await state.clear()
+            return
+
+        text = f'🔎 Результаты поиска по запросу: {query}\n\n'
+
+        for project in projects:
+            text += format_project(project)
+
+        await message.answer(
+            text,
+            reply_markup=get_results_keyboard('text'),
+        )
+
+        for project in projects:
+            await save_project(
+                user_id=user_id,
+                repo_id=project['id'],
+                repo_name=project['full_name'],
+                repo_url=project['url'],
+                query_type='text',
+                query_text=query,
+            )
+
+        await state.set_state(None)
+        await state.update_data(
+            search_type='text',
+            query_text=query,
+            shown_repo_ids=[project['id'] for project in projects],
+        )
 
 
 @router.callback_query(DirectionCb.filter())
@@ -88,11 +259,181 @@ async def direction_handler(
     )
 
 
+@router.callback_query(F.data == 'back_to_directions')
+async def back_to_directions_handler(callback: CallbackQuery) -> None:
+    message = await get_callback_message(callback)
+
+    if message is None:
+        return
+
+    await callback.answer()
+
+    await message.edit_text(
+        'Выберите направление:',
+        reply_markup=get_directions_keyboard(),
+    )
+
+
+@router.callback_query(F.data == 'back_to_main')
+async def back_to_main_handler(
+        callback: CallbackQuery,
+        state: FSMContext,
+) -> None:
+    message = await get_callback_message(callback)
+
+    if message is None:
+        return
+
+    await state.clear()
+    await callback.answer()
+
+    await message.edit_text('🏠 Главное меню')
+
+    await message.answer(
+        'Выберите действие:',
+        reply_markup=main_keyboard,
+    )
+
+
+@router.callback_query(RetrySearchCb.filter())
+async def retry_search_handler(
+        callback: CallbackQuery,
+        callback_data: RetrySearchCb,
+        state: FSMContext,
+        github_client: httpx.AsyncClient,
+) -> None:
+    message = await get_callback_message(callback)
+
+    if message is None:
+        return
+
+    data = await state.get_data()
+    search_type = callback_data.search_type
+
+    if search_type not in ('direction', 'text'):
+        await callback.answer('Неизвестный тип поиска.', show_alert=True)
+        return
+
+    if search_type == 'direction':
+        direction = callback_data.direction
+        language = callback_data.language
+
+        if (
+                direction not in DIRECTIONS
+                or language not in LANGUAGES
+                or language not in LANGUAGES_BY_DIRECTION[direction]
+        ):
+            await callback.answer('Некорректный выбор.', show_alert=True)
+            return
+
+        same_search = (
+            data.get('search_type') == 'direction'
+            and data.get('direction') == direction
+            and data.get('language') == language
+        )
+
+        query = None
+
+    else:
+        direction = None
+        language = None
+        query = data.get('query_text')
+
+        same_search = (
+            isinstance(query, str)
+            and bool(query)
+            and data.get('search_type') == 'text'
+        )
+
+    if not same_search:
+        await callback.answer(
+            'Данные поиска устарели. Начните новый поиск.',
+            show_alert=True,
+        )
+        return
+
+    user_id = callback.from_user.id
+    lock = search_locks.setdefault(user_id, asyncio.Lock())
+
+    if lock.locked():
+        await callback.answer(
+            '⏳ Поиск уже выполняется.',
+            show_alert=True,
+        )
+        return
+
+    await callback.answer()
+
+    async with lock:
+        exclude_ids = set(data.get('shown_repo_ids', []))
+
+        try:
+            if search_type == 'direction':
+                assert direction is not None
+                assert language is not None
+
+                projects = await get_projects(
+                    direction,
+                    language,
+                    github_client,
+                    exclude_ids=exclude_ids,
+                )
+            else:
+                assert query is not None
+
+                projects = await search_projects(
+                    query,
+                    github_client,
+                    exclude_ids=exclude_ids,
+                )
+
+        except httpx.HTTPError as error:
+            await message.answer(get_github_error_message(error))
+            return
+
+        if not projects:
+            await message.answer('Новых проектов пока не найдено.')
+            return
+
+        text = '🔄 Новые проекты:\n\n'
+
+        for project in projects:
+            text += format_project(project)
+
+        await message.edit_text(
+            text,
+            reply_markup=get_results_keyboard(
+                search_type=search_type,
+                direction=direction or '',
+                language=language or '',
+            ),
+        )
+
+        for project in projects:
+            await save_project(
+                user_id=user_id,
+                repo_id=project['id'],
+                repo_name=project['full_name'],
+                repo_url=project['url'],
+                query_type=search_type,
+                direction=direction,
+                language=language,
+                query_text=query,
+            )
+
+        exclude_ids.update(project['id'] for project in projects)
+
+        await state.update_data(
+            shown_repo_ids=list(exclude_ids),
+        )
+
+
 @router.callback_query(LanguageCb.filter())
 async def language_handler(
         callback: CallbackQuery,
         callback_data: LanguageCb,
         github_client: httpx.AsyncClient,
+        state: FSMContext,
 ) -> None:
     message = await get_callback_message(callback)
 
@@ -127,27 +468,9 @@ async def language_handler(
         try:
             projects = await get_projects(direction, language, github_client)
 
-        except httpx.TimeoutException:
+        except httpx.HTTPError as error:
             await message.edit_text(
-                '⏳ GitHub слишком долго отвечает. Попробуйте позже.'
-            )
-            return
-
-        except httpx.HTTPStatusError as error:
-            if error.response.status_code in (403, 429):
-                await message.edit_text(
-                    '⏳ GitHub временно ограничил количество запросов. '
-                    'Попробуйте немного позже.'
-                )
-            else:
-                await message.edit_text(
-                    '⚠️ Ошибка GitHub API. Попробуйте позже.'
-                )
-            return
-
-        except httpx.RequestError:
-            await message.edit_text(
-                '🌐 Не удалось подключиться к GitHub. Попробуйте позже.'
+                get_github_error_message(error)
             )
             return
 
@@ -167,14 +490,16 @@ async def language_handler(
         )
 
         for project in projects:
-            text += (
-                f"📦 {project['name']}\n"
-                f"📝 {project['description']}\n"
-                f"⭐ {project['stars']}\n"
-                f"🔗 {project['url']}\n\n"
-            )
+            text += format_project(project)
 
-        await message.edit_text(text)
+        await message.edit_text(
+            text,
+            reply_markup=get_results_keyboard(
+                search_type='direction',
+                direction=direction,
+                language=language,
+            ),
+        )
 
         for project in projects:
             await save_project(
@@ -182,4 +507,15 @@ async def language_handler(
                 repo_id=project['id'],
                 repo_name=project['full_name'],
                 repo_url=project['url'],
+                query_type='direction',
+                direction=direction,
+                language=language,
             )
+
+        await state.set_state(None)
+        await state.update_data(
+            search_type='direction',
+            direction=direction,
+            language=language,
+            shown_repo_ids=[project['id'] for project in projects],
+        )

@@ -6,7 +6,7 @@ from aiogram.types import (
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from data.callbacks import DirectionCb, LanguageCb
+from data.callbacks import DirectionCb, LanguageCb, RetrySearchCb
 from data.dictionaries import DIRECTIONS, LANGUAGES
 
 
@@ -34,6 +34,13 @@ def get_directions_keyboard() -> InlineKeyboardMarkup:
 
     builder.adjust(2)
 
+    builder.row(
+        InlineKeyboardButton(
+            text='🏠 Главное меню',
+            callback_data='back_to_main',
+        )
+    )
+
     return builder.as_markup()
 
 
@@ -56,4 +63,62 @@ def get_languages_keyboard(
         ]
     )
 
+    keyboard.inline_keyboard.append(
+        [
+            InlineKeyboardButton(
+                text='⬅️ Назад к направлениям',
+                callback_data='back_to_directions',
+            )
+        ]
+    )
+
+    keyboard.inline_keyboard.append(
+        [
+            InlineKeyboardButton(
+                text='🏠 Главное меню',
+                callback_data='back_to_main',
+            )
+        ]
+    )
+
     return keyboard
+
+
+def get_search_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text='🏠 Главное меню',
+                    callback_data='back_to_main',
+                )
+            ]
+        ]
+    )
+
+
+def get_results_keyboard(
+        search_type: str,
+        direction: str = '',
+        language: str = '',
+) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text='🔄 Искать ещё',
+                    callback_data=RetrySearchCb(
+                        search_type=search_type,
+                        direction=direction,
+                        language=language,
+                    ).pack(),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text='🏠 Главное меню',
+                    callback_data='back_to_main',
+                )
+            ],
+        ]
+    )
