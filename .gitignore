@@ -22,3 +22,4 @@ bot.db
 *.sqlite3-wal
 *.sqlite3-shm
 .pytest_cache/
+data_storage/
